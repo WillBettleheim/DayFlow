@@ -1,0 +1,29 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model task {
+  id          Int       @id @default(autoincrement())
+  title       String
+  category    String    @default("Personal")
+  priority    String    @default("Medium")
+  done        Boolean   @default(false)
+  completedAt DateTime?
+  dueDate     DateTime?
+  createdAt   DateTime  @default(now()) @map("createadAt")
+  projectId   Int? 
+  project     Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+} 
+model Project {
+  id        Int      @id @default(autoincrement())
+  name      String
+  dueDate   DateTime?
+  createdAt DateTime @default(now()) 
+  tasks     task[]
+}
