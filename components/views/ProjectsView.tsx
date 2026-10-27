@@ -1,6 +1,17 @@
+
 "use client";
 
 import { useMemo, useState } from "react";
+
+type Priority = "High" | "Medium" | "Low";
+
+type Task = {
+  id: number;
+  title?: string;
+  priority?: Priority;
+  done: boolean;
+  projectId?: number | null;
+};
 
 type Project = {
   id: number;
@@ -11,321 +22,566 @@ type Project = {
 
 type Props = {
   projects: Project[];
+  tasks?: Task[];
   loading: boolean;
   onDelete: (id: number) => void;
   onUpdate: (
     id: number,
-    data: { name?: string; dueDate?: string | null }
+    data: {
+      name?: string;
+      dueDate?: string | null;
+    }
   ) => void;
   onAddClick: () => void;
 };
 
-type FilterTab = "All" | "Active" | "Overdue" | "No deadline";
-type SortMode = "Newest" | "Deadline" | "Name";
+type Filter =
+  | "All"
+  | "In progress"
+  | "Completed"
+  | "Overdue"
+  | "No deadline";
 
-type Urgency = "overdue" | "critical" | "soon" | "upcoming" | "none";
+type Sort = "Newest" | "Deadline" | "Name";
 
-function startOfDay(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+const projectColors = [
+  "#D8FF56",
+  "#8EA8FF",
+  "#FFB48A",
+  "#B8E986",
+  "#D8B4FE",
+];
+
+const card =
+  "min-w-0 rounded-[22px] border border-white/[0.06] bg-[#282B27]";
+
+const inputClass =
+  "w-full min-w-0 rounded-xl border border-white/10 bg-[#20231F] px-4 py-3 text-sm text-[#F5F6F1] outline-none focus:border-[#D8FF56]";
+
+function dateKey(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
-function daysUntil(iso: string | null): number | null {
-  if (!iso) return null;
-  const target = startOfDay(new Date(iso));
-  const today = startOfDay(new Date());
-  return Math.round(
-    (target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-  );
-}
+function formatDate(value: string | null): string {
+  if (!value) return "No deadline";
 
-function getUrgency(days: number | null): Urgency {
-  if (days === null) return "none";
-  if (days < 0) return "overdue";
-  if (days <= 1) return "critical";
-  if (days <= 3) return "soon";
-  if (days <= 7) return "upcoming";
-  return "none";
-}
+  const key = value.slice(0, 10);
+  const parts = key.split("-").map(Number);
 
-const urgencyStyles: Record<
-  Urgency,
-  {
-    badge: string;
-    ring: string;
-    label: (d: number) => string;
-  }
-> = {
-  overdue: {
-    badge: "bg-rose-500/15 text-rose-300 border-rose-500/30",
-    ring: "border-rose-500/30",
-    label: (d) => `${Math.abs(d)}d overdue`,
-  },
-  critical: {
-    badge:
-      "bg-rose-500/15 text-rose-300 border-rose-500/30 animate-pulse",
-    ring: "border-rose-500/40",
-    label: (d) => (d === 0 ? "Due today" : "Due tomorrow"),
-  },
-  soon: {
-    badge: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-    ring: "border-amber-500/30",
-    label: (d) => `${d} days left`,
-  },
-  upcoming: {
-    badge: "bg-yellow-500/10 text-yellow-300 border-yellow-500/20",
-    ring: "border-white/10",
-    label: (d) => `${d} days left`,
-  },
-  none: {
-    badge: "bg-white/5 text-gray-400 border-white/10",
-    ring: "border-white/10",
-    label: () => "No deadline",
-  },
-};
+  if (parts.length !== 3) return key;
 
-function formatDate(iso: string | null) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
+  const [year, month, day] = parts;
+  const date = new Date(year, month - 1, day);
+
+  if (Number.isNaN(date.getTime())) return key;
+
+  return date.toLocaleDateString("en-US", {
     day: "numeric",
+    month: "short",
     year: "numeric",
   });
 }
 
-function toInputDate(iso: string | null) {
-  if (!iso) return "";
-  return new Date(iso).toISOString().slice(0, 10);
+function progressFor(projectId: number, tasks: Task[]) {
+  const linkedTasks = tasks.filter(
+    (task) => task.projectId === projectId
+  );
+
+  const completedTasks = linkedTasks.filter(
+    (task) => task.done
+  );
+
+  const progress = linkedTasks.length
+    ? Math.round(
+        (completedTasks.length / linkedTasks.length) *
+          100
+      )
+    : 0;
+
+  return {
+    linkedTasks,
+    total: linkedTasks.length,
+    completed: completedTasks.length,
+    progress,
+  };
 }
 
 export default function ProjectsView({
   projects,
+  tasks = [],
   loading,
   onDelete,
   onUpdate,
   onAddClick,
 }: Props) {
-  const [filterTab, setFilterTab] = useState<FilterTab>("All");
-  const [sortMode, setSortMode] = useState<SortMode>("Newest");
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editingName, setEditingName] = useState("");
-  const [editingDueDate, setEditingDueDate] = useState("");
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<
-    number | null
-  >(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<Filter>("All");
+  const [sort, setSort] = useState<Sort>("Newest");
 
-  const counts = useMemo(() => {
-    const overdue = projects.filter((p) => {
-      const d = daysUntil(p.dueDate);
-      return d !== null && d < 0;
-    }).length;
-    const noDeadline = projects.filter((p) => !p.dueDate).length;
-    const active = projects.length - overdue;
-    return { all: projects.length, active, overdue, noDeadline };
-  }, [projects]);
+  const [editingId, setEditingId] =
+    useState<number | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingDate, setEditingDate] = useState("");
+
+  const [deleteId, setDeleteId] =
+    useState<number | null>(null);
+
+  const [expandedIds, setExpandedIds] = useState<
+    number[]
+  >([]);
+
+  const today = dateKey(new Date());
+
+  const stats = useMemo(() => {
+    const completedProjects = projects.filter(
+      (project) => {
+        const result = progressFor(project.id, tasks);
+
+        return (
+          result.total > 0 &&
+          result.completed === result.total
+        );
+      }
+    ).length;
+
+    const activeProjects = projects.filter(
+      (project) => {
+        const result = progressFor(project.id, tasks);
+
+        return (
+          result.total > 0 &&
+          result.completed < result.total
+        );
+      }
+    ).length;
+
+    const overdueProjects = projects.filter(
+      (project) => {
+        const due = project.dueDate?.slice(0, 10);
+
+        if (!due || due >= today) return false;
+
+        const result = progressFor(project.id, tasks);
+
+        return (
+          result.total === 0 ||
+          result.completed < result.total
+        );
+      }
+    ).length;
+
+    return {
+      completedProjects,
+      activeProjects,
+      overdueProjects,
+    };
+  }, [projects, tasks, today]);
 
   const visibleProjects = useMemo(() => {
-    let result = [...projects];
+    const query = search.trim().toLowerCase();
 
-    if (filterTab === "Active") {
-      result = result.filter((p) => {
-        const d = daysUntil(p.dueDate);
-        return d === null || d >= 0;
-      });
-    } else if (filterTab === "Overdue") {
-      result = result.filter((p) => {
-        const d = daysUntil(p.dueDate);
-        return d !== null && d < 0;
-      });
-    } else if (filterTab === "No deadline") {
-      result = result.filter((p) => !p.dueDate);
-    }
+    const filtered = projects.filter((project) => {
+      if (
+        query &&
+        !project.name.toLowerCase().includes(query)
+      ) {
+        return false;
+      }
 
-    if (sortMode === "Newest") {
-      result.sort((a, b) => b.id - a.id);
-    } else if (sortMode === "Deadline") {
-      result.sort((a, b) => {
-        const da = daysUntil(a.dueDate);
-        const db = daysUntil(b.dueDate);
-        if (da === null && db === null) return 0;
-        if (da === null) return 1;
-        if (db === null) return -1;
-        return da - db;
-      });
-    } else if (sortMode === "Name") {
-      result.sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-      );
-    }
+      const result = progressFor(project.id, tasks);
+      const due = project.dueDate?.slice(0, 10);
 
-    return result;
-  }, [projects, filterTab, sortMode]);
+      if (filter === "Completed") {
+        return (
+          result.total > 0 &&
+          result.completed === result.total
+        );
+      }
 
-  function startEdit(project: Project) {
+      if (filter === "In progress") {
+        return (
+          result.total > 0 &&
+          result.completed < result.total
+        );
+      }
+
+      if (filter === "Overdue") {
+        return (
+          !!due &&
+          due < today &&
+          (result.total === 0 ||
+            result.completed < result.total)
+        );
+      }
+
+      if (filter === "No deadline") {
+        return !project.dueDate;
+      }
+
+      return true;
+    });
+
+    filtered.sort((a, b) => {
+      if (sort === "Name") {
+        return a.name.localeCompare(b.name);
+      }
+
+      if (sort === "Deadline") {
+        return (
+          (a.dueDate ?? "9999").localeCompare(
+            b.dueDate ?? "9999"
+          ) || b.id - a.id
+        );
+      }
+
+      return b.id - a.id;
+    });
+
+    return filtered;
+  }, [projects, tasks, search, filter, sort, today]);
+
+  function startEditing(project: Project) {
+    setDeleteId(null);
     setEditingId(project.id);
     setEditingName(project.name);
-    setEditingDueDate(toInputDate(project.dueDate));
+    setEditingDate(
+      project.dueDate?.slice(0, 10) ?? ""
+    );
   }
 
-  function cancelEdit() {
+  function cancelEditing() {
     setEditingId(null);
     setEditingName("");
-    setEditingDueDate("");
+    setEditingDate("");
   }
 
-  function saveEdit() {
-    if (editingId === null || !editingName.trim()) return;
+  function saveEditing() {
+    if (
+      editingId === null ||
+      !editingName.trim()
+    ) {
+      return;
+    }
+
     onUpdate(editingId, {
       name: editingName.trim(),
-      dueDate: editingDueDate || null,
+      dueDate: editingDate || null,
     });
-    setEditingId(null);
-    setEditingName("");
-    setEditingDueDate("");
+
+    cancelEditing();
   }
+
+  function toggleExpanded(id: number) {
+    setExpandedIds((current) =>
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id]
+    );
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setFilter("All");
+    setSort("Newest");
+  }
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">
+    <div className="min-w-0 space-y-4 pb-8 text-[#F5F6F1] sm:space-y-5">
+      {/* HEADER */}
+
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-[#A6AD9B] sm:text-xs">
+            Your workspace
+          </p>
+
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
             Your Projects
+            <span className="text-[#D8FF56]">.</span>
           </h2>
-          <p className="mt-1 text-sm text-gray-500">
-            {counts.all} total · {counts.active} active · {counts.overdue}{" "}
-            overdue
+
+          <p className="mt-2 text-sm text-[#9EA598]">
+            Organize goals, track deadlines, and monitor
+            progress.
           </p>
         </div>
 
         <button
+          type="button"
           onClick={onAddClick}
-          className="rounded-xl bg-violet-500 px-5 py-2.5 text-sm font-semibold transition hover:bg-violet-400"
+          className="w-full rounded-xl bg-[#D8FF56] px-5 py-3 text-sm font-semibold text-[#20231D] transition hover:bg-[#E8FF9B] sm:w-auto"
         >
           + New project
         </button>
+      </header>
+
+      {/* STATS */}
+
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+        <StatCard
+          title="Total projects"
+          value={projects.length}
+          loading={loading}
+        />
+
+        <StatCard
+          title="In progress"
+          value={stats.activeProjects}
+          loading={loading}
+        />
+
+        <StatCard
+          title="Completed"
+          value={stats.completedProjects}
+          loading={loading}
+        />
+
+        <StatCard
+          title="Overdue"
+          value={stats.overdueProjects}
+          loading={loading}
+          blue
+        />
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-white/10 bg-[#121620] p-4">
-        <div className="flex gap-1 rounded-xl bg-white/[0.03] p-1">
-          {(["All", "Active", "Overdue", "No deadline"] as FilterTab[]).map(
-            (tab) => (
-              <button
-                key={tab}
-                onClick={() => setFilterTab(tab)}
-                className={`rounded-lg px-4 py-1.5 text-sm transition ${
-                  filterTab === tab
-                    ? "bg-violet-500/20 font-medium text-violet-200"
-                    : "text-gray-400 hover:text-white"
-                }`}
-              >
-                {tab}
-              </button>
-            )
-          )}
+      {/* SEARCH AND FILTERS */}
+
+      <section className={`${card} p-4 sm:p-5`}>
+        <label
+          htmlFor="dayflow-project-search"
+          className="mb-2 block text-xs text-[#A6AD9B]"
+        >
+          Search projects
+        </label>
+
+        <input
+          id="dayflow-project-search"
+          type="search"
+          value={search}
+          onChange={(event) =>
+            setSearch(event.target.value)
+          }
+          placeholder="Search by project name..."
+          className={inputClass}
+        />
+
+        <div className="mt-4 flex gap-2 overflow-x-auto pb-2">
+          {(
+            [
+              "All",
+              "In progress",
+              "Completed",
+              "Overdue",
+              "No deadline",
+            ] as Filter[]
+          ).map((item) => (
+            <button
+              type="button"
+              key={item}
+              aria-pressed={filter === item}
+              onClick={() => setFilter(item)}
+              className={`min-h-10 shrink-0 rounded-xl px-4 py-2 text-sm transition ${
+                filter === item
+                  ? "bg-[#D8FF56] font-semibold text-[#20231D]"
+                  : "bg-[#20231F] text-[#A6AD9B] hover:text-white"
+              }`}
+            >
+              {item}
+            </button>
+          ))}
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-gray-500">Sort by</span>
-          <select
-            value={sortMode}
-            onChange={(e) => setSortMode(e.target.value as SortMode)}
-            className="rounded-xl border border-white/10 bg-[#0b0d12] px-3 py-2 text-sm outline-none focus:border-violet-400"
-          >
-            <option value="Newest">Newest</option>
-            <option value="Deadline">Deadline</option>
-            <option value="Name">Name</option>
-          </select>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-[#A6AD9B]">
+            Showing {visibleProjects.length} of{" "}
+            {projects.length} projects
+          </p>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="min-h-10 text-sm text-[#D8FF56]"
+            >
+              Clear
+            </button>
+
+            <select
+              aria-label="Sort projects"
+              value={sort}
+              onChange={(event) =>
+                setSort(event.target.value as Sort)
+              }
+              className="min-h-10 rounded-xl border border-white/10 bg-[#20231F] px-3 text-sm text-white"
+            >
+              <option value="Newest">Newest</option>
+              <option value="Deadline">Deadline</option>
+              <option value="Name">Name</option>
+            </select>
+          </div>
         </div>
-      </div>
+      </section>
+
+      {/* PROJECT GRID */}
 
       {loading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {[1, 2, 3].map((i) => (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {[1, 2, 3].map((item) => (
             <div
-              key={i}
-              className="h-40 animate-pulse rounded-2xl bg-white/[0.03]"
+              key={item}
+              className="h-64 animate-pulse rounded-[22px] bg-[#282B27]"
             />
           ))}
         </div>
       ) : visibleProjects.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-white/10 bg-[#121620] p-12 text-center">
-          <p className="text-sm text-gray-400">
+        <section className={`${card} p-8 text-center`}>
+          <p className="text-sm text-[#A6AD9B]">
             {projects.length === 0
-              ? "No projects yet."
-              : "No projects match this filter."}
+              ? "No projects yet. Create your first project."
+              : "No projects match your filters."}
           </p>
+
           <button
-            onClick={onAddClick}
-            className="mt-3 text-sm text-violet-300 transition hover:text-violet-200"
+            type="button"
+            onClick={
+              projects.length === 0
+                ? onAddClick
+                : clearFilters
+            }
+            className="mt-4 min-h-10 text-sm font-semibold text-[#D8FF56]"
           >
-            + Create a project →
+            {projects.length === 0
+              ? "+ Create project"
+              : "Clear filters"}
           </button>
-        </div>
+        </section>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {visibleProjects.map((project) => {
-            const d = daysUntil(project.dueDate);
-            const u = getUrgency(d);
-            const styles = urgencyStyles[u];
-            const isEditing = editingId === project.id;
-            const isConfirmingDelete = confirmingDeleteId === project.id;
+            const result = progressFor(project.id, tasks);
+
+            const overdue =
+              !!project.dueDate &&
+              project.dueDate.slice(0, 10) < today &&
+              result.progress < 100;
+
+            const isEditing =
+              editingId === project.id;
+            const isDeleting =
+              deleteId === project.id;
+            const expanded =
+              expandedIds.includes(project.id);
 
             return (
-              <div
+              <article
                 key={project.id}
-                className={`flex flex-col rounded-2xl border bg-[#121620] p-5 transition hover:bg-white/[0.02] ${styles.ring}`}
+                className={`${card} flex min-h-64 flex-col p-4 sm:p-5`}
               >
                 {isEditing ? (
-                  <div className="space-y-3">
-                    <input
-                      value={editingName}
-                      onChange={(e) => setEditingName(e.target.value)}
-                      placeholder="Project name"
-                      className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-violet-400"
-                      autoFocus
-                    />
-                    <input
-                      type="date"
-                      value={editingDueDate}
-                      onChange={(e) => setEditingDueDate(e.target.value)}
-                      className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-violet-400"
-                    />
-                    <div className="flex gap-2">
+                  /* EDIT FORM */
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveEditing();
+                    }}
+                    className="space-y-4"
+                  >
+                    <h3 className="text-lg font-semibold">
+                      Edit Project
+                    </h3>
+
+                    <label className="block">
+                      <span className="mb-2 block text-xs text-[#A6AD9B]">
+                        Project name
+                      </span>
+
+                      <input
+                        required
+                        autoFocus
+                        maxLength={255}
+                        value={editingName}
+                        onChange={(event) =>
+                          setEditingName(
+                            event.target.value
+                          )
+                        }
+                        className={inputClass}
+                      />
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-2 block text-xs text-[#A6AD9B]">
+                        Deadline
+                      </span>
+
+                      <input
+                        type="date"
+                        value={editingDate}
+                        onChange={(event) =>
+                          setEditingDate(
+                            event.target.value
+                          )
+                        }
+                        className={inputClass}
+                      />
+                    </label>
+
+                    <div className="grid grid-cols-2 gap-2">
                       <button
-                        onClick={saveEdit}
-                        className="flex-1 rounded-lg bg-emerald-500/15 px-3 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-500/25"
+                        type="submit"
+                        className="min-h-11 rounded-xl bg-[#D8FF56] px-3 text-sm font-semibold text-[#20231D]"
                       >
                         Save
                       </button>
+
                       <button
-                        onClick={cancelEdit}
-                        className="flex-1 rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5"
+                        type="button"
+                        onClick={cancelEditing}
+                        className="min-h-11 rounded-xl border border-white/10 px-3 text-sm"
                       >
                         Cancel
                       </button>
                     </div>
-                  </div>
-                ) : isConfirmingDelete ? (
-                  <div className="space-y-3">
-                    <p className="text-sm text-gray-200">
-                      Delete <span className="font-medium">{project.name}</span>?
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      This cannot be undone.
-                    </p>
-                    <div className="flex gap-2">
+                  </form>
+                ) : isDeleting ? (
+                  /* DELETE CONFIRMATION */
+                  <div className="flex flex-1 flex-col justify-between gap-5">
+                    <div>
+                      <h3 className="text-lg font-semibold text-[#FF9F9B]">
+                        Delete project?
+                      </h3>
+
+                      <p className="mt-3 break-words text-sm">
+                        {project.name}
+                      </p>
+
+                      <p className="mt-3 text-xs text-[#A6AD9B]">
+                        This action cannot be undone.
+                        Depending on your database rules,
+                        linked tasks may prevent deletion.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
                       <button
+                        type="button"
                         onClick={() => {
                           onDelete(project.id);
-                          setConfirmingDeleteId(null);
+                          setDeleteId(null);
                         }}
-                        className="flex-1 rounded-lg bg-rose-500/15 px-3 py-2 text-sm font-medium text-rose-300 transition hover:bg-rose-500/25"
+                        className="min-h-11 rounded-xl bg-[#FF817D]/15 px-3 text-sm font-semibold text-[#FF9F9B]"
                       >
                         Delete
                       </button>
+
                       <button
-                        onClick={() => setConfirmingDeleteId(null)}
-                        className="flex-1 rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5"
+                        type="button"
+                        onClick={() => setDeleteId(null)}
+                        className="min-h-11 rounded-xl border border-white/10 px-3 text-sm"
                       >
                         Cancel
                       </button>
@@ -333,46 +589,186 @@ export default function ProjectsView({
                   </div>
                 ) : (
                   <>
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="min-w-0 flex-1 break-words text-base font-semibold text-gray-100">
-                        {project.name}
-                      </p>
+                    {/* PROJECT TITLE */}
+
+                    <div className="flex min-w-0 items-start justify-between gap-3">
                       <span
-                        className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-medium ${styles.badge}`}
+                        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-xl font-bold text-[#20231D]"
+                        style={{
+                          backgroundColor:
+                            projectColors[
+                              Math.abs(project.id) %
+                                projectColors.length
+                            ],
+                        }}
                       >
-                        {d !== null ? styles.label(d) : "No deadline"}
+                        {project.name
+                          .charAt(0)
+                          .toUpperCase()}
+                      </span>
+
+                      <span
+                        className={`max-w-[60%] rounded-full px-3 py-1.5 text-right text-[11px] ${
+                          overdue
+                            ? "bg-[#FF817D]/15 text-[#FF9F9B]"
+                            : "bg-white/5 text-[#B8C0B2]"
+                        }`}
+                      >
+                        {overdue ? "Overdue · " : ""}
+                        {formatDate(project.dueDate)}
                       </span>
                     </div>
 
-                    <p className="mt-3 text-xs text-gray-500">
-                      {project.dueDate
-                        ? `Deadline · ${formatDate(project.dueDate)}`
-                        : "No deadline set"}
+                    <h3 className="mt-5 break-words text-lg font-semibold">
+                      {project.name}
+                    </h3>
+
+                    <p className="mt-2 text-xs text-[#A6AD9B]">
+                      {result.completed} of {result.total}{" "}
+                      tasks completed
                     </p>
 
-                    <div className="mt-auto flex items-center justify-end gap-2 pt-5">
+                    {/* PROGRESS */}
+
+                    <div className="mt-5 flex items-center justify-between gap-3">
+                      <span className="text-xs text-[#A6AD9B]">
+                        Progress
+                      </span>
+
+                      <strong className="text-sm text-[#D8FF56]">
+                        {result.progress}%
+                      </strong>
+                    </div>
+
+                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#41463E]">
+                      <div
+                        className="h-full rounded-full bg-[#D8FF56] transition-all"
+                        style={{
+                          width: `${result.progress}%`,
+                        }}
+                      />
+                    </div>
+
+                    {/* EXPANDABLE LINKED TASKS */}
+
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      onClick={() =>
+                        toggleExpanded(project.id)
+                      }
+                      className="mt-5 flex min-h-11 w-full items-center justify-between rounded-xl bg-[#333730] px-3 text-left text-sm text-[#D8FF56]"
+                    >
+                      <span>
+                        View linked tasks ({result.total})
+                      </span>
+
+                      <span aria-hidden="true">
+                        {expanded ? "−" : "+"}
+                      </span>
+                    </button>
+
+                    {expanded && (
+                      <div className="mt-3 space-y-2">
+                        {result.linkedTasks.length === 0 ? (
+                          <p className="rounded-xl border border-dashed border-white/10 p-4 text-xs text-[#A6AD9B]">
+                            No tasks linked to this project
+                            yet.
+                          </p>
+                        ) : (
+                          result.linkedTasks.map((task) => (
+                            <div
+                              key={task.id}
+                              className="flex min-w-0 items-start gap-2 rounded-xl bg-[#333730] p-3"
+                            >
+                              <span
+                                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs ${
+                                  task.done
+                                    ? "border-[#D8FF56] bg-[#D8FF56] text-[#20231D]"
+                                    : "border-[#858F7C]"
+                                }`}
+                              >
+                                {task.done ? "✓" : ""}
+                              </span>
+
+                              <p
+                                className={`min-w-0 flex-1 break-words text-xs ${
+                                  task.done
+                                    ? "text-[#9EA598] line-through"
+                                    : "text-[#F5F6F1]"
+                                }`}
+                              >
+                                {task.title ||
+                                  `Task #${task.id}`}
+                              </p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
+                    {/* ACTIONS */}
+
+                    <div className="mt-auto flex justify-end gap-2 border-t border-white/[0.06] pt-4">
                       <button
-                        onClick={() => startEdit(project)}
-                        aria-label="Edit project"
-                        className="rounded-lg px-2 py-1 text-sm text-gray-400 transition hover:bg-white/5 hover:text-blue-400"
+                        type="button"
+                        onClick={() => startEditing(project)}
+                        className="min-h-10 rounded-xl bg-[#D8FF56]/10 px-4 text-sm font-medium text-[#D8FF56]"
                       >
-                        ✏️
+                        Edit
                       </button>
+
                       <button
-                        onClick={() => setConfirmingDeleteId(project.id)}
-                        aria-label="Delete project"
-                        className="rounded-lg px-2 py-1 text-sm text-gray-400 transition hover:bg-white/5 hover:text-red-400"
+                        type="button"
+                        onClick={() =>
+                          setDeleteId(project.id)
+                        }
+                        className="min-h-10 rounded-xl bg-[#FF817D]/10 px-4 text-sm font-medium text-[#FF9F9B]"
                       >
-                        ×
+                        Delete
                       </button>
                     </div>
                   </>
                 )}
-              </div>
+              </article>
             );
           })}
         </div>
       )}
     </div>
+  );
+}
+
+function StatCard({
+  title,
+  value,
+  loading,
+  blue = false,
+}: {
+  title: string;
+  value: number;
+  loading: boolean;
+  blue?: boolean;
+}) {
+  return (
+    <section
+      className={`min-w-0 rounded-[20px] p-4 sm:p-5 ${
+        blue
+          ? "bg-[#456CF0]"
+          : "border border-white/[0.06] bg-[#282B27]"
+      }`}
+    >
+      <p
+        className={`text-xs sm:text-sm ${
+          blue ? "text-white/75" : "text-[#A6AD9B]"
+        }`}
+      >
+        {title}
+      </p>
+
+      <p className="mt-3 text-3xl font-semibold sm:mt-4 sm:text-4xl">
+        {loading ? "—" : value}
+      </p>
+    </section>
   );
 }
