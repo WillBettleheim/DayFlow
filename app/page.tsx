@@ -1,19 +1,32 @@
+
 "use client";
-import { useEffect, useMemo, useState } from "react";
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import type { FormEvent } from "react";
+
 import OverviewView from "../components/views/OverviewView";
 import TasksView from "../components/views/TasksView";
 import ProjectsView from "../components/views/ProjectsView";
-import PlannerView from "../components/views/PlannerView"; 
+import PlannerView from "../components/views/PlannerView";
 import FocusView from "../components/views/FocusView";
 import InsightsView from "../components/views/InsightsView";
+
+type Priority = "High" | "Medium" | "Low";
+
 type Task = {
   id: number;
   title: string;
   category: string;
-  priority: "High" | "Medium" | "Low";
+  priority: Priority;
   done: boolean;
   completedAt: string | null;
   dueDate: string | null;
+  projectId?: number | null;
 };
 
 type Project = {
@@ -23,699 +36,494 @@ type Project = {
   dueDate: string | null;
 };
 
-const navItems = [
-  "Overview",
-  "My Tasks",
-  "Projects",
-  "Planner",
-  "Focus",
-  "Insights",
+type Page =
+  | "Overview"
+  | "Tasks"
+  | "Projects"
+  | "Planner"
+  | "Focus"
+  | "Insights";
+
+const navigation: {
+  name: Page;
+  symbol: string;
+  description: string;
+}[] = [
+  { name: "Overview", symbol: "▦", description: "Dashboard" },
+  { name: "Tasks", symbol: "☑", description: "Manage tasks" },
+  { name: "Projects", symbol: "▤", description: "Your projects" },
+  { name: "Planner", symbol: "▣", description: "Plan your days" },
+  { name: "Focus", symbol: "◎", description: "Stay focused" },
+  { name: "Insights", symbol: "◫", description: "Your analytics" },
 ];
 
-function startOfDay(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+const inputClass =
+  "w-full min-w-0 rounded-xl border border-white/10 bg-[#20231F] px-4 py-3 text-sm text-[#F5F6F1] outline-none focus:border-[#D8FF56]";
+
+const primaryButton =
+  "rounded-xl bg-[#D8FF56] px-4 py-3 text-sm font-semibold text-[#20231D] transition hover:bg-[#E8FF9B] disabled:opacity-50 sm:px-5";
+
+const secondaryButton =
+  "rounded-xl border border-white/10 bg-[#30342E] px-4 py-3 text-sm text-[#D7DECF] transition hover:bg-[#3B4038] sm:px-5";
+
+function dateKey(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
-function daysBetween(a: Date, b: Date) {
-  const MS = 1000 * 60 * 60 * 24;
-  return Math.round(
-    (startOfDay(a).getTime() - startOfDay(b).getTime()) / MS
-  );
-}
-
-function daysUntil(iso: string | null): number | null {
-  if (!iso) return null;
-  return daysBetween(new Date(iso), new Date());
-}
-
-function formatDeadline(iso: string | null) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function computeStreaks(tasks: Task[]) {
-  const completedDays = new Set<string>();
-  for (const t of tasks) {
-    if (t.done && t.completedAt) {
-      const d = startOfDay(new Date(t.completedAt));
-      completedDays.add(d.toISOString().slice(0, 10));
-    }
-  }
-
-  let current = 0;
-  const today = startOfDay(new Date());
-  for (let i = 0; i < 3650; i++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    if (completedDays.has(key)) {
-      current++;
-    } else if (i === 0) {
-      continue;
-    } else {
-      break;
-    }
-  }
-
-  const sorted = Array.from(completedDays).sort();
-  let longest = 0;
-  let run = 0;
-  let prev: Date | null = null;
-  for (const key of sorted) {
-    const d = new Date(key + "T00:00:00");
-    if (prev && daysBetween(d, prev) === 1) {
-      run++;
-    } else {
-      run = 1;
-    }
-    longest = Math.max(longest, run);
-    prev = d;
-  }
-
-  const last7 = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(today);
-    d.setDate(d.getDate() - (6 - i));
-    const key = d.toISOString().slice(0, 10);
-    return {
-      key,
-      label: d.toLocaleDateString("en-US", { weekday: "narrow" }),
-      active: completedDays.has(key),
-    };
+async function apiRequest<T>(
+  url: string,
+  method = "GET",
+  body?: unknown
+): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    ...(body === undefined
+      ? {}
+      : { body: JSON.stringify(body) }),
   });
 
-  return { current, longest, last7 };
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+
+    try {
+      const result: unknown = await response.json();
+
+      if (
+        result !== null &&
+        typeof result === "object" &&
+        "error" in result &&
+        typeof result.error === "string"
+      ) {
+        message = result.error;
+      }
+    } catch {
+      // Preserve the HTTP error.
+    }
+
+    throw new Error(message);
+  }
+
+  return (await response.json()) as T;
 }
-
-type Urgency = "overdue" | "critical" | "soon" | "upcoming" | "none";
-
-function getUrgency(days: number | null): Urgency {
-  if (days === null) return "none";
-  if (days < 0) return "overdue";
-  if (days <= 1) return "critical";
-  if (days <= 3) return "soon";
-  if (days <= 7) return "upcoming";
-  return "none";
-}
-
-const urgencyStyles: Record<
-  Urgency,
-  { badge: string; banner: string; label: (d: number) => string }
-> = {
-  overdue: {
-    badge: "bg-rose-500/15 text-rose-300 border-rose-500/30",
-    banner:
-      "border-rose-500/30 bg-gradient-to-r from-rose-500/15 to-rose-500/5",
-    label: (d) => `${Math.abs(d)}d overdue`,
-  },
-  critical: {
-    badge:
-      "bg-rose-500/15 text-rose-300 border-rose-500/30 animate-pulse",
-    banner:
-      "border-rose-500/30 bg-gradient-to-r from-rose-500/15 to-transparent",
-    label: (d) => (d === 0 ? "Due today" : "Due tomorrow"),
-  },
-  soon: {
-    badge: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-    banner:
-      "border-amber-500/30 bg-gradient-to-r from-amber-500/15 to-transparent",
-    label: (d) => `${d} days left`,
-  },
-  upcoming: {
-    badge: "bg-yellow-500/10 text-yellow-300 border-yellow-500/20",
-    banner:
-      "border-yellow-500/20 bg-gradient-to-r from-yellow-500/10 to-transparent",
-    label: (d) => `${d} days left`,
-  },
-  none: {
-    badge: "bg-white/5 text-gray-400 border-white/10",
-    banner: "border-white/10 bg-white/[0.02]",
-    label: (d) => `${d} days`,
-  },
-};
 
 export default function Home() {
+  const [activePage, setActivePage] =
+    useState<Page>("Overview");
+
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+
   const [loading, setLoading] = useState(true);
-  const [toast, setToast] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
-  const [activeNav, setActiveNav] = useState("Overview");
+  // RESPONSIVE NAVIGATION
+  const [mobileMenuOpen, setMobileMenuOpen] =
+    useState(false);
 
-  const [newTask, setNewTask] = useState("");
-  const [newTaskPriority, setNewTaskPriority] = useState<
-    "High" | "Medium" | "Low"
-  >("Medium");
-  const [newTaskCategory, setNewTaskCategory] = useState("Personal");
-  const [newTaskDueDate, setNewTaskDueDate] = useState("");
-  const [showInput, setShowInput] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] =
+    useState(false);
 
-  const [newProject, setNewProject] = useState("");
-  const [newProjectDueDate, setNewProjectDueDate] = useState("");
-  const [showProjectInput, setShowProjectInput] = useState(false);
+  // CREATE TASK FORM
+  const [taskFormOpen, setTaskFormOpen] =
+    useState(false);
+  const [taskTitle, setTaskTitle] = useState("");
+  const [taskCategory, setTaskCategory] =
+    useState("Personal");
+  const [taskPriority, setTaskPriority] =
+    useState<Priority>("Medium");
+  const [taskDueDate, setTaskDueDate] = useState("");
+  const [taskProjectId, setTaskProjectId] =
+    useState("");
 
-  const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
-  const [editingTitle, setEditingTitle] = useState("");
-  const [editingPriority, setEditingPriority] = useState<
-    "High" | "Medium" | "Low"
-  >("Medium");
+  // CREATE PROJECT FORM
+  const [projectFormOpen, setProjectFormOpen] =
+    useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [projectDueDate, setProjectDueDate] =
+    useState("");
 
-  const [dismissedHeadlines, setDismissedHeadlines] = useState<number[]>([]);
-
+  // RESTORE SIDEBAR PREFERENCE
   useEffect(() => {
-    async function loadData() {
-      try {
-        const [tasksResponse, projectsResponse] = await Promise.all([
-          fetch("/api/tasks"),
-          fetch("/api/projects"),
-        ]);
+    try {
+      setSidebarCollapsed(
+        localStorage.getItem("dayflow-sidebar-collapsed") ===
+          "true"
+      );
+    } catch {
+      // Storage is optional.
+    }
+  }, []);
 
-        if (!tasksResponse.ok) throw new Error("Failed to load tasks");
-        if (!projectsResponse.ok) throw new Error("Failed to load projects");
+  // ESC KEY CLOSES MOBILE MENU
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
 
-        const tasksData = await tasksResponse.json();
-        const projectsData = await projectsResponse.json();
-
-        setTasks(tasksData);
-        setProjects(projectsData);
-      } catch (error) {
-        console.error("Error loading dashboard data:", error);
-        showToast("Failed to load data");
-      } finally {
-        setLoading(false);
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMobileMenuOpen(false);
       }
     }
 
-    loadData();
-  }, []);
+    window.addEventListener("keydown", handleKeyDown);
 
-  function showToast(msg: string) {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2200);
+    return () =>
+      window.removeEventListener(
+        "keydown",
+        handleKeyDown
+      );
+  }, [mobileMenuOpen]);
+
+  function toggleSidebar() {
+    setSidebarCollapsed((previous) => {
+      const next = !previous;
+
+      try {
+        localStorage.setItem(
+          "dayflow-sidebar-collapsed",
+          String(next)
+        );
+      } catch {
+        // Layout still works without storage.
+      }
+
+      return next;
+    });
   }
 
-  const completed = tasks.filter((t) => t.done).length;
-  const progress =
-    tasks.length === 0 ? 0 : Math.round((completed / tasks.length) * 100);
-  const remaining = tasks.length - completed;
+  const loadData = useCallback(async () => {
+    setLoading(true);
 
-  const highPriority = tasks.filter(
-    (t) => t.priority === "High" && !t.done
-  ).length;
-  const mediumPriority = tasks.filter(
-    (t) => t.priority === "Medium" && !t.done
-  ).length;
-  const lowPriority = tasks.filter(
-    (t) => t.priority === "Low" && !t.done
-  ).length;
+    try {
+      const [taskData, projectData] =
+        await Promise.all([
+          apiRequest<Task[]>("/api/tasks"),
+          apiRequest<Project[]>("/api/projects"),
+        ]);
 
-  const streaks = useMemo(() => computeStreaks(tasks), [tasks]);
-
-  const projectsWithDeadlines = useMemo(() => {
-    return projects
-      .map((p) => ({ ...p, daysLeft: daysUntil(p.dueDate) }))
-      .filter(
-        (p) =>
-          p.daysLeft !== null &&
-          p.daysLeft <= 7 &&
-          !dismissedHeadlines.includes(p.id)
-      )
-      .sort((a, b) => (a.daysLeft! - b.daysLeft!));
-  }, [projects, dismissedHeadlines]);
-
-  const weeklyData = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-
-    const nextDate = new Date(date);
-    nextDate.setDate(nextDate.getDate() + 1);
-
-    const completedCount = tasks.filter((task) => {
-      if (!task.done || !task.completedAt) return false;
-      const completedDate = new Date(task.completedAt);
-      return (
-        completedDate.getTime() >= date.getTime() &&
-        completedDate.getTime() < nextDate.getTime()
+      setTasks(taskData);
+      setProjects(projectData);
+      setError("");
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to load DAYFLOW."
       );
-    }).length;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-    return {
-      day: date.toLocaleDateString("en-US", { weekday: "short" }),
-      count: completedCount,
-    };
-  });
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
-  const maxWeeklyCount = Math.max(
-    ...weeklyData.map((item) => item.count),
-    1
-  );
+  function showError(
+    caught: unknown,
+    fallback: string
+  ) {
+    setError(
+      caught instanceof Error ? caught.message : fallback
+    );
+  }
+
+  function navigate(page: Page) {
+    setActivePage(page);
+    setMobileMenuOpen(false);
+    setTaskFormOpen(false);
+    setProjectFormOpen(false);
+  }
+
+  function openTaskForm() {
+    setMobileMenuOpen(false);
+    setProjectFormOpen(false);
+    setTaskFormOpen(true);
+  }
+
+  function openProjectForm() {
+    setMobileMenuOpen(false);
+    setActivePage("Projects");
+    setTaskFormOpen(false);
+    setProjectFormOpen(true);
+  }
+
+  // TASK ACTIONS
+
+  async function createTask(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    if (!taskTitle.trim() || saving) return;
+
+    setSaving(true);
+
+    try {
+      const created = await apiRequest<Task>(
+        "/api/tasks",
+        "POST",
+        {
+          title: taskTitle.trim(),
+          category: taskCategory,
+          priority: taskPriority,
+          dueDate: taskDueDate
+            ? `${taskDueDate}T12:00:00.000Z`
+            : null,
+          projectId: taskProjectId
+            ? Number(taskProjectId)
+            : null,
+        }
+      );
+
+      setTasks((current) => [created, ...current]);
+
+      setTaskTitle("");
+      setTaskCategory("Personal");
+      setTaskPriority("Medium");
+      setTaskDueDate("");
+      setTaskProjectId("");
+      setTaskFormOpen(false);
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not create task.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function toggleTask(id: number) {
-    const task = tasks.find((item) => item.id === id);
-    if (!task) return;
-    const updatedDone = !task.done;
+    const existing = tasks.find((task) => task.id === id);
+    if (!existing) return;
+
     try {
-      const response = await fetch("/api/tasks", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: task.id,
-          done: updatedDone,
-          completedAt: updatedDone ? new Date().toISOString() : null,
-        }),
-      });
-      if (!response.ok) throw new Error("Failed to update task");
-      const updatedTask = await response.json();
+      const updated = await apiRequest<Task>(
+        "/api/tasks",
+        "PATCH",
+        {
+          id,
+          done: !existing.done,
+        }
+      );
+
       setTasks((current) =>
-        current.map((item) =>
-          item.id === updatedTask.id ? updatedTask : item
+        current.map((task) =>
+          task.id === id ? updated : task
         )
       );
-      if (updatedDone) showToast("Nice! Task completed 🔥");
-    } catch (error) {
-      console.error("Error updating task:", error);
-      showToast("Could not update task");
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not update task.");
+    }
+  }
+
+  async function editTask(
+    id: number,
+    title: string,
+    priority: Priority
+  ) {
+    if (!title.trim()) return;
+
+    try {
+      const updated = await apiRequest<Task>(
+        "/api/tasks",
+        "PATCH",
+        {
+          id,
+          title: title.trim(),
+          priority,
+        }
+      );
+
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === id ? updated : task
+        )
+      );
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not edit task.");
     }
   }
 
   async function deleteTask(id: number) {
+    if (!window.confirm("Delete this task?")) return;
+
     try {
-      const response = await fetch("/api/tasks", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
-      if (!response.ok) throw new Error("Failed to delete task");
-      setTasks((current) => current.filter((task) => task.id !== id));
-    } catch (error) {
-      console.error("Error deleting task:", error);
-      showToast("Could not delete task");
+      await apiRequest<unknown>(
+        "/api/tasks",
+        "DELETE",
+        { id }
+      );
+
+      setTasks((current) =>
+        current.filter((task) => task.id !== id)
+      );
+
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not delete task.");
     }
   }
 
-  async function editTask(id: number) {
-    if (!editingTitle.trim()) return;
+  // PROJECT ACTIONS
+
+  async function createProject(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    if (!projectName.trim() || saving) return;
+
+    setSaving(true);
+
     try {
-      const response = await fetch("/api/tasks", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id,
-          title: editingTitle.trim(),
-          priority: editingPriority,
-        }),
-      });
-      if (!response.ok) throw new Error("Failed to edit task");
-      const updatedTask = await response.json();
-      setTasks((current) =>
-        current.map((task) =>
-          task.id === updatedTask.id ? updatedTask : task
+      const created = await apiRequest<Project>(
+        "/api/projects",
+        "POST",
+        {
+          name: projectName.trim(),
+          dueDate: projectDueDate || null,
+        }
+      );
+
+      setProjects((current) => [created, ...current]);
+
+      setProjectName("");
+      setProjectDueDate("");
+      setProjectFormOpen(false);
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not create project.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function updateProject(
+    id: number,
+    data: {
+      name?: string;
+      dueDate?: string | null;
+    }
+  ) {
+    try {
+      const updated = await apiRequest<Project>(
+        `/api/projects/${id}`,
+        "PATCH",
+        data
+      );
+
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === id ? updated : project
         )
       );
-      setEditingTaskId(null);
-      setEditingTitle("");
-    } catch (error) {
-      console.error("Error editing task:", error);
-      showToast("Could not edit task");
-    }
-  }
-  async function editTaskDirect(
-    id: number,
-    newTitle: string,
-    newPriority: "High" | "Medium" | "Low"
-  ) {
-    if(!newTitle.trim()) return;
-    try {
-      const response = await fetch("/api/tasks", {
-        method: "PATCH",
-        headers: {"Content-Type": "application/json" },
-        body: JSON.stringify({
-          id,
-          title: newTitle.trim(),
-          priority: newPriority,
-        }),
-      });
-      if(!response.ok) throw new Error("Failed to edit Task");
-      const updatedTask = await response.json();
-      setTasks((current) =>
-        current.map((task) =>
-         task.id === updatedTask.id ? updatedTask : task
-    ));
-    } catch (error) {
-      console.error("Error editing task:", error);
-      showToast("Could not edit task");
-    }
-  }
-    async function updateProject(
-    id: number,
-    data: { name?: string; dueDate?: string | null }
-  ) {
-    try {
-      const response = await fetch(`/api/projects/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!response.ok) throw new Error("Failed to update project");
-      const updated = await response.json();
-      setProjects((current) =>
-        current.map((p) => (p.id === updated.id ? updated : p))
-      );
-      showToast("Project updated");
-    } catch (error) {
-      console.error("Error updating project:", error);
-      showToast("Could not update project");
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not update project.");
     }
   }
 
   async function deleteProject(id: number) {
     try {
-      const response = await fetch(`/api/projects/${id}`, {
-        method: "DELETE",
-      });
-      if (!response.ok) throw new Error("Failed to delete project");
-      setProjects((current) => current.filter((p) => p.id !== id));
-      showToast("Project deleted");
-    } catch (error) {
-      console.error("Error deleting project:", error);
-      showToast("Could not delete project");
+      await apiRequest<unknown>(
+        `/api/projects/${id}`,
+        "DELETE"
+      );
+
+      setProjects((current) =>
+        current.filter((project) => project.id !== id)
+      );
+
+      const refreshedTasks =
+        await apiRequest<Task[]>("/api/tasks");
+
+      setTasks(refreshedTasks);
+      setError("");
+    } catch (caught) {
+      showError(caught, "Could not delete project.");
+      void loadData();
     }
   }
 
-  async function createProject() {
-    if (!newProject.trim()) return;
-    try {
-      const response = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: newProject.trim(),
-          dueDate: newProjectDueDate || null,
+  // DASHBOARD STATISTICS
+
+  const completed = tasks.filter(
+    (task) => task.done
+  ).length;
+
+  const remaining = tasks.length - completed;
+
+  const progress = tasks.length
+    ? Math.round((completed / tasks.length) * 100)
+    : 0;
+
+  const highPriority = tasks.filter(
+    (task) => !task.done && task.priority === "High"
+  ).length;
+
+  const mediumPriority = tasks.filter(
+    (task) => !task.done && task.priority === "Medium"
+  ).length;
+
+  const lowPriority = tasks.filter(
+    (task) => !task.done && task.priority === "Low"
+  ).length;
+
+  const weeklyData = useMemo(() => {
+    return Array.from({ length: 7 }, (_, index) => {
+      const date = new Date();
+      date.setHours(0, 0, 0, 0);
+      date.setDate(date.getDate() - (6 - index));
+
+      const key = dateKey(date);
+
+      const count = tasks.filter((task) => {
+        if (!task.done || !task.completedAt) {
+          return false;
+        }
+
+        const finished = new Date(task.completedAt);
+
+        return (
+          !Number.isNaN(finished.getTime()) &&
+          dateKey(finished) === key
+        );
+      }).length;
+
+      return {
+        day: date.toLocaleDateString("en-US", {
+          weekday: "short",
         }),
-      });
-      if (!response.ok) throw new Error("Failed to create project");
-      const createdProject = await response.json();
-      setProjects((current) => [createdProject, ...current]);
-      setNewProject("");
-      setNewProjectDueDate("");
-      setShowProjectInput(false);
-      showToast("Project created");
-    } catch (error) {
-      console.error("Error creating project:", error);
-      showToast("Could not create project");
-    }
-  }
+        count,
+      };
+    });
+  }, [tasks]);
 
-  async function addTask() {
-    if (!newTask.trim()) return;
-    try {
-      const response = await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: newTask.trim(),
-          category: newTaskCategory,
-          priority: newTaskPriority,
-          dueDate: newTaskDueDate || null,
-        }),
-      });
-      if (!response.ok) throw new Error("Failed to create task");
-      const createdTask = await response.json();
-      setTasks((current) => [createdTask, ...current]);
-      setNewTask("");
-      setNewTaskPriority("Medium");
-      setNewTaskCategory("Personal");
-      setNewTaskDueDate("");
-      setShowInput(false);
-    } catch (error) {
-      console.error("Error creating task:", error);
-      showToast("Could not save task");
-    }
-  }
+  const maxWeeklyCount = Math.max(
+    1,
+    ...weeklyData.map((day) => day.count)
+  );
 
-  const date = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  });
-  return (
-    <main className="min-h-screen bg-[#0b0d12] text-white md:flex">
-      {toast && (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl border border-violet-400/30 bg-violet-500/15 px-5 py-3 text-sm text-violet-200 backdrop-blur-md">
-          {toast}
-        </div>
-      )}
+  // CONNECT ALL SIX VIEWS
 
-      <aside className="flex w-full flex-col border-b border-white/10 bg-[#10131b] p-5 md:min-h-screen md:w-64 md:border-b-0 md:border-r">
-        <div className="mb-8 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-400 to-violet-600 text-lg font-bold shadow-lg shadow-violet-500/20">
-            D
-          </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">DAYFLOW</h1>
-            <p className="text-xs text-gray-500">Your personal workspace</p>
-          </div>
-        </div>
-
-        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500">
-          Workspace
-        </p>
-
-        <nav className="flex flex-wrap gap-2 md:flex-col">
-          {navItems.map((item, index) => (
-            <button
-              key={item}
-              onClick={() => setActiveNav(item)}
-              className={`group rounded-xl px-4 py-3 text-left text-sm transition-all duration-200 ${
-                activeNav === item
-                  ? "bg-violet-500/15 font-medium text-violet-300"
-                  : "text-gray-400 hover:bg-white/5 hover:text-white"
-              }`}
-            >
-              <span className="mr-3 inline-block text-base">
-                {["◫", "☑", "▦", "▤", "◷", "⌁"][index]}
-              </span>
-              {item}
-            </button>
-          ))}
-        </nav>
-
-        <div className="mt-8 rounded-2xl border border-orange-400/20 bg-gradient-to-br from-orange-500/10 to-transparent p-4">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🔥</span>
-            <p className="text-sm font-semibold text-orange-200">
-              {streaks.current} day streak
-            </p>
-          </div>
-          <div className="mt-3 flex gap-1">
-            {streaks.last7.map((d) => (
-              <div
-                key={d.key}
-                title={d.key}
-                className={`flex h-6 flex-1 items-center justify-center rounded-md text-[10px] font-medium ${
-                  d.active
-                    ? "bg-orange-400/80 text-black"
-                    : "bg-white/5 text-gray-600"
-                }`}
-              >
-                {d.label}
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-gray-500">
-            Longest: {streaks.longest} days
-          </p>
-        </div>
-
-        <div className="mt-auto hidden items-center gap-3 border-t border-white/10 pt-5 md:flex">
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-violet-500/20 font-semibold text-violet-300">
-            D
-          </div>
-          <div>
-            <p className="text-sm font-medium">My Workspace</p>
-            <p className="text-xs text-gray-500">Personal account</p>
-          </div>
-        </div>
-      </aside>
-
-      <section className="min-w-0 flex-1 p-5 md:p-8 lg:p-10">
-        <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-sm text-gray-500">{date}</p>
-            <h2 className="mt-2 text-3xl font-semibold tracking-tight md:text-4xl">
-              Good to see you
-              <span className="text-violet-400">.</span>
-            </h2>
-            <p className="mt-2 text-sm text-gray-400">
-              Make today count, one task at a time.
-            </p>
-          </div>
-
-          <button
-            onClick={() => setShowInput((c) => !c)}
-            className="rounded-xl bg-gradient-to-br from-violet-500 to-violet-600 px-5 py-3 text-sm font-semibold shadow-lg shadow-violet-500/20 transition-all hover:-translate-y-0.5"
-          >
-            + New task
-          </button>
-        </header>
-
-        {projectsWithDeadlines.length > 0 && (
-          <div className="mb-6 space-y-3">
-            {projectsWithDeadlines.map((p) => {
-              const u = getUrgency(p.daysLeft);
-              const styles = urgencyStyles[u];
-              return (
-                <div
-                  key={p.id}
-                  className={`group flex items-center gap-3 rounded-2xl border px-4 py-3 transition-all hover:-translate-y-0.5 ${styles.banner}`}
-                >
-                  <span className="text-lg">
-                    {u === "overdue"
-                      ? "⚠️"
-                      : u === "critical"
-                      ? "🚨"
-                      : u === "soon"
-                      ? "⏳"
-                      : "📅"}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">
-                      <span className="text-white">{p.name}</span>{" "}
-                      <span className="text-gray-400">
-                        — {styles.label(p.daysLeft!)}
-                      </span>
-                    </p>
-                    <p className="mt-0.5 text-xs text-gray-500">
-                      Deadline {formatDeadline(p.dueDate)}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() =>
-                      setDismissedHeadlines((c) => [...c, p.id])
-                    }
-                    className="rounded-lg px-2 py-1 text-xs text-gray-500 transition hover:bg-white/5 hover:text-white"
-                    aria-label="Dismiss"
-                  >
-                    ✕
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {showInput && (
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              addTask();
-            }}
-            className="mb-6 rounded-2xl border border-white/10 bg-[#141822] p-4"
-          >
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-              <input
-                autoFocus
-                value={newTask}
-                onChange={(event) => setNewTask(event.target.value)}
-                placeholder="What do you need to do?"
-                className="rounded-xl border border-white/10 bg-[#0b0d12] px-4 py-3 text-sm outline-none focus:border-violet-400 lg:col-span-2"
-              />
-              <select
-                value={newTaskPriority}
-                onChange={(event) =>
-                  setNewTaskPriority(
-                    event.target.value as "High" | "Medium" | "Low"
-                  )
-                }
-                className="rounded-xl border border-white/10 bg-[#0b0d12] px-4 py-3 text-sm outline-none"
-              >
-                <option value="High">High Priority</option>
-                <option value="Medium">Medium Priority</option>
-                <option value="Low">Low Priority</option>
-              </select>
-              <input
-                type="date"
-                value={newTaskDueDate}
-                onChange={(event) => setNewTaskDueDate(event.target.value)}
-                className="rounded-xl border border-white/10 bg-[#0b0d12] px-4 py-3 text-sm text-white outline-none"
-              />
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <select
-                value={newTaskCategory}
-                onChange={(event) => setNewTaskCategory(event.target.value)}
-                className="rounded-xl border border-white/10 bg-[#0b0d12] px-4 py-3 text-sm outline-none"
-              >
-                <option value="Personal">Personal</option>
-                <option value="Work">Work</option>
-                <option value="Study">Study</option>
-                <option value="Health">Health</option>
-                <option value="Development">Development</option>
-              </select>
-
-              <div className="flex gap-2">
-                <button
-                  type="submit"
-                  className="rounded-xl bg-violet-500 px-5 py-3 text-sm font-semibold hover:bg-violet-400"
-                >
-                  Add Task
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowInput(false)}
-                  className="rounded-xl px-4 py-3 text-sm text-gray-400 hover:bg-white/5"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </form>
-        )}
-               {activeNav === "My Tasks" ? (
-          <TasksView
-            tasks={tasks}
-            loading={loading}
-            onToggle={toggleTask}
-            onDelete={deleteTask}
-            onEdit={editTaskDirect}
-            onAddClick={() => setShowInput(true)}
-          />
-        ) : activeNav === "Projects" ? (
-          <ProjectsView
-            projects={projects}
-            loading={loading}
-            onDelete={deleteProject}
-            onUpdate={updateProject}
-            onAddClick={() => setShowProjectInput(true)}
-          />
-        ) : activeNav === "Planner" ? (
-          <PlannerView
-            tasks={tasks}
-            loading={loading}
-            onToggle={toggleTask}
-            onAddClick={() => setShowInput(true)}
-          />
-        ) : activeNav === "Focus" ? (
-          <FocusView
-            tasks={tasks}
-            loading={loading}
-            onToggle={toggleTask}
-            onAddClick={() => setShowInput(true)}
-          />
-        ) : activeNav === "Insights" ? (
-          <InsightsView tasks={tasks} loading={loading} />
-        ) : (
+  function renderCurrentView() {
+    switch (activePage) {
+      case "Overview":
+        return (
           <OverviewView
             tasks={tasks}
             projects={projects}
             loading={loading}
-            activeNav={activeNav}
+            activeNav={activePage}
             completed={completed}
             progress={progress}
             remaining={remaining}
@@ -725,97 +533,590 @@ export default function Home() {
             weeklyData={weeklyData}
             maxWeeklyCount={maxWeeklyCount}
           />
-        )}
-         {activeNav === "Overview" && (
-        <section className="rounded-2xl border border-white/10 bg-[#121620] p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-lg font-semibold">Your projects</h3>
-              <p className="mt-1 text-sm text-gray-500">
-                Keep an eye on your goals.
-              </p>
-            </div>
-            <button
-              onClick={() =>
-                setShowProjectInput((current) => !current)
-              }
-              className="rounded-xl border border-white/10 px-4 py-2 text-sm text-gray-300 transition hover:bg-white/5"
-            >
-              + New project
-            </button>
-          </div>
+        );
 
-          {showProjectInput && (
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <input
-                value={newProject}
-                onChange={(event) => setNewProject(event.target.value)}
-                placeholder="Project name"
-                className="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white outline-none focus:border-violet-400"
-                autoFocus
-              />
-              <input
-                type="date"
-                value={newProjectDueDate}
-                onChange={(event) =>
-                  setNewProjectDueDate(event.target.value)
-                }
-                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white outline-none focus:border-violet-400"
-              />
+      case "Tasks":
+        return (
+          <TasksView
+            tasks={tasks}
+            loading={loading}
+            onToggle={(id) => void toggleTask(id)}
+            onDelete={(id) => void deleteTask(id)}
+            onEdit={(id, title, priority) =>
+              void editTask(id, title, priority)
+            }
+            onAddClick={openTaskForm}
+          />
+        );
+
+      case "Projects":
+        return (
+          <ProjectsView
+            projects={projects}
+            tasks={tasks}
+            loading={loading}
+            onDelete={(id) => void deleteProject(id)}
+            onUpdate={(id, data) =>
+              void updateProject(id, data)
+            }
+            onAddClick={openProjectForm}
+          />
+        );
+
+      case "Planner":
+        return (
+          <PlannerView
+            tasks={tasks}
+            loading={loading}
+            onToggle={(id) => void toggleTask(id)}
+            onAddClick={openTaskForm}
+          />
+        );
+
+      case "Focus":
+        return (
+          <FocusView
+            tasks={tasks}
+            loading={loading}
+            onToggle={(id) => void toggleTask(id)}
+            onAddClick={openTaskForm}
+          />
+        );
+
+      case "Insights":
+        return (
+          <InsightsView
+            tasks={tasks}
+            loading={loading}
+          />
+        );
+    }
+  }
+
+  return (
+    <main className="min-h-screen overflow-x-clip bg-[#191B19] text-[#F5F6F1] lg:flex">
+      {/* MOBILE MENU BACKDROP */}
+
+      {mobileMenuOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation menu"
+          onClick={() => setMobileMenuOpen(false)}
+          className="fixed inset-0 z-40 bg-black/70 lg:hidden"
+        />
+      )}
+
+      {/* RESPONSIVE SIDEBAR */}
+
+      <aside
+        id="dayflow-navigation"
+        className={`fixed inset-y-0 left-0 z-50 flex w-[260px] max-w-[85vw] flex-col border-r border-white/[0.07] bg-[#21241F] shadow-2xl transition-transform duration-200 lg:sticky lg:top-0 lg:z-auto lg:h-screen lg:max-w-none lg:shrink-0 lg:translate-x-0 lg:shadow-none lg:transition-[width] ${
+          mobileMenuOpen
+            ? "translate-x-0"
+            : "-translate-x-full"
+        } ${
+          sidebarCollapsed
+            ? "lg:w-[84px]"
+            : "lg:w-[250px]"
+        }`}
+      >
+        {/* LOGO AND SIDEBAR BUTTONS */}
+
+        <div
+          className={`flex items-center border-b border-white/[0.06] p-4 ${
+            sidebarCollapsed
+              ? "lg:flex-col lg:gap-3"
+              : "justify-between"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => navigate("Overview")}
+            title="DAYFLOW Overview"
+            className="flex min-w-0 items-center gap-3"
+          >
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] bg-[#D8FF56] text-2xl font-black text-[#20231D]">
+              D
+            </span>
+
+            <span
+              className={`min-w-0 text-left ${
+                sidebarCollapsed ? "lg:hidden" : ""
+              }`}
+            >
+              <span className="block text-lg font-bold tracking-tight">
+                DAYFLOW
+              </span>
+              <span className="block text-[10px] uppercase tracking-[0.12em] text-[#9EA598]">
+                Life OS
+              </span>
+            </span>
+          </button>
+
+          {/* MOBILE CLOSE */}
+
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={() => setMobileMenuOpen(false)}
+            className="ml-auto flex h-10 w-10 items-center justify-center rounded-xl bg-white/5 text-xl text-white lg:hidden"
+          >
+            ×
+          </button>
+
+          {/* DESKTOP COLLAPSE */}
+
+          <button
+            type="button"
+            title={
+              sidebarCollapsed
+                ? "Expand sidebar"
+                : "Collapse sidebar"
+            }
+            aria-label={
+              sidebarCollapsed
+                ? "Expand sidebar"
+                : "Collapse sidebar"
+            }
+            aria-expanded={!sidebarCollapsed}
+            onClick={toggleSidebar}
+            className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 text-[#D8FF56] transition hover:bg-white/10 lg:flex"
+          >
+            {sidebarCollapsed ? "»" : "«"}
+          </button>
+        </div>
+
+        {/* NAVIGATION */}
+
+        <div
+          className={`pt-6 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#788172] ${
+            sidebarCollapsed
+              ? "lg:hidden"
+              : "px-6"
+          }`}
+        >
+          Workspace
+        </div>
+
+        <nav
+          aria-label="Main navigation"
+          className="mt-4 flex-1 space-y-1 overflow-y-auto px-3"
+        >
+          {navigation.map((item) => {
+            const selected = activePage === item.name;
+
+            return (
               <button
-                onClick={createProject}
-                className="rounded-xl bg-violet-500 px-4 py-2 text-sm font-medium text-white hover:bg-violet-400"
+                key={item.name}
+                type="button"
+                title={item.name}
+                aria-current={
+                  selected ? "page" : undefined
+                }
+                onClick={() => navigate(item.name)}
+                className={`flex min-h-12 w-full items-center gap-3 rounded-xl px-4 py-3 text-left transition ${
+                  sidebarCollapsed
+                    ? "lg:justify-center lg:px-2"
+                    : ""
+                } ${
+                  selected
+                    ? "bg-[#D8FF56] font-semibold text-[#20231D]"
+                    : "text-[#A8B0A1] hover:bg-white/[0.06] hover:text-white"
+                }`}
               >
-                Add
+                <span
+                  aria-hidden="true"
+                  className="w-6 shrink-0 text-center text-xl"
+                >
+                  {item.symbol}
+                </span>
+
+                <span
+                  className={`min-w-0 ${
+                    sidebarCollapsed ? "lg:hidden" : ""
+                  }`}
+                >
+                  <span className="block text-sm">
+                    {item.name}
+                  </span>
+
+                  <span
+                    className={`block text-[11px] ${
+                      selected
+                        ? "text-[#55613A]"
+                        : "text-[#778173]"
+                    }`}
+                  >
+                    {item.description}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* PROGRESS CARD */}
+
+        <div
+          className={`p-3 ${
+            sidebarCollapsed ? "lg:hidden" : ""
+          }`}
+        >
+          <div className="rounded-[18px] bg-[#30352B] p-4">
+            <p className="text-xs text-[#ABB5A2]">
+              Your workspace progress
+            </p>
+
+            <div className="mt-3 flex items-baseline gap-1">
+              <span className="text-3xl font-semibold">
+                {progress}
+              </span>
+              <span className="text-xl text-[#D8FF56]">
+                %
+              </span>
+            </div>
+
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+              <div
+                className="h-full rounded-full bg-[#D8FF56]"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+
+            <p className="mt-3 text-xs text-[#99A493]">
+              {completed} of {tasks.length} tasks complete
+            </p>
+          </div>
+        </div>
+      </aside>
+
+      {/* MAIN WORKSPACE */}
+
+      <div className="min-w-0 flex-1">
+        {/* RESPONSIVE HEADER */}
+
+        <header className="border-b border-white/[0.06] bg-[#191B19] px-4 py-4 sm:px-6 lg:px-8">
+          <div className="mx-auto flex max-w-[1450px] flex-wrap items-center gap-3">
+            {/* MOBILE HAMBURGER */}
+
+            <button
+              type="button"
+              aria-label="Open navigation menu"
+              aria-expanded={mobileMenuOpen}
+              aria-controls="dayflow-navigation"
+              onClick={() => setMobileMenuOpen(true)}
+              className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-[5px] rounded-xl border border-white/10 bg-[#282B27] lg:hidden"
+            >
+              <span className="h-0.5 w-5 rounded-full bg-[#D8FF56]" />
+              <span className="h-0.5 w-5 rounded-full bg-[#D8FF56]" />
+              <span className="h-0.5 w-5 rounded-full bg-[#D8FF56]" />
+            </button>
+
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] font-medium uppercase tracking-[0.12em] text-[#9EA598] sm:text-xs">
+                DAYFLOW / {activePage}
+              </p>
+
+              <h1 className="mt-1 truncate text-lg font-semibold tracking-tight sm:text-2xl">
+                Your workspace
+                <span className="text-[#D8FF56]">.</span>
+              </h1>
+            </div>
+
+            <div className="flex w-full gap-2 sm:w-auto">
+              <button
+                type="button"
+                onClick={openProjectForm}
+                className={`${secondaryButton} flex-1 sm:flex-none`}
+              >
+                + Project
+              </button>
+
+              <button
+                type="button"
+                onClick={openTaskForm}
+                className={`${primaryButton} flex-1 sm:flex-none`}
+              >
+                + New task
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* CONTENT */}
+
+        <div className="mx-auto w-full max-w-[1450px] min-w-0 px-3 py-5 sm:px-6 lg:px-8">
+          {/* API ERROR */}
+
+          {error && (
+            <div
+              role="alert"
+              className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#FF817D]/30 bg-[#FF817D]/10 p-4 text-sm text-[#FFB4AE]"
+            >
+              <span className="min-w-0 break-words">
+                {error}
+              </span>
+
+              <button
+                type="button"
+                onClick={() => setError("")}
+                className="underline"
+              >
+                Dismiss
               </button>
             </div>
           )}
 
-          {projects.length === 0 ? (
-            <div className="mt-5 rounded-xl border border-dashed border-white/10 p-6 text-center">
-              <p className="text-sm text-gray-500">No projects yet.</p>
-            </div>
-          ) : (
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {projects.map((project) => {
-                const d = daysUntil(project.dueDate);
-                const u = getUrgency(d);
-                const styles = urgencyStyles[u];
-                return (
-                  <div
-                    key={project.id}
-                    className="rounded-xl border border-white/10 bg-white/[0.02] p-4 transition hover:bg-white/[0.04]"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="truncate text-sm font-medium text-gray-200">
-                        {project.name}
-                      </p>
-                      {d !== null && (
-                        <span
-                          className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${styles.badge}`}
-                        >
-                          {styles.label(d)}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-2 text-xs text-gray-500">
-                      {project.dueDate
-                        ? `Deadline ${formatDeadline(project.dueDate)}`
-                        : "No deadline"}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-         )}
+          {/* CREATE TASK FORM */}
 
-        <footer className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-5 text-xs text-gray-600">
-          <p>DAYFLOW · Your personal workspace</p>
-          <p>One step at a time.</p>
-        </footer>
-      </section>
+          {taskFormOpen && (
+            <section className="mb-6 rounded-[22px] border border-[#D8FF56]/20 bg-[#282B27] p-4 sm:p-6">
+              <div className="mb-5 flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.15em] text-[#A6AD9B]">
+                    Quick capture
+                  </p>
+                  <h2 className="mt-2 text-xl font-semibold">
+                    Create a task
+                  </h2>
+                </div>
+
+                <button
+                  type="button"
+                  aria-label="Close task form"
+                  onClick={() => setTaskFormOpen(false)}
+                  className="text-2xl text-[#A6AD9B]"
+                >
+                  ×
+                </button>
+              </div>
+
+              <form
+                onSubmit={(event) => void createTask(event)}
+                className="space-y-4"
+              >
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  <label className="space-y-2 sm:col-span-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Task name
+                    </span>
+
+                    <input
+                      required
+                      maxLength={255}
+                      value={taskTitle}
+                      onChange={(event) =>
+                        setTaskTitle(event.target.value)
+                      }
+                      placeholder="What needs to be done?"
+                      className={inputClass}
+                    />
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Priority
+                    </span>
+
+                    <select
+                      value={taskPriority}
+                      onChange={(event) =>
+                        setTaskPriority(
+                          event.target.value as Priority
+                        )
+                      }
+                      className={inputClass}
+                    >
+                      <option value="High">High</option>
+                      <option value="Medium">Medium</option>
+                      <option value="Low">Low</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Category
+                    </span>
+
+                    <select
+                      value={taskCategory}
+                      onChange={(event) =>
+                        setTaskCategory(event.target.value)
+                      }
+                      className={inputClass}
+                    >
+                      <option value="Personal">Personal</option>
+                      <option value="Work">Work</option>
+                      <option value="Study">Study</option>
+                      <option value="Health">Health</option>
+                      <option value="Development">
+                        Development
+                      </option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Due date
+                    </span>
+
+                    <input
+                      type="date"
+                      value={taskDueDate}
+                      onChange={(event) =>
+                        setTaskDueDate(event.target.value)
+                      }
+                      className={inputClass}
+                    />
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Project (optional)
+                    </span>
+
+                    <select
+                      value={taskProjectId}
+                      onChange={(event) =>
+                        setTaskProjectId(event.target.value)
+                      }
+                      className={inputClass}
+                    >
+                      <option value="">No project</option>
+
+                      {projects.map((project) => (
+                        <option
+                          key={project.id}
+                          value={project.id}
+                        >
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className={primaryButton}
+                  >
+                    {saving ? "Saving..." : "Save task"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setTaskFormOpen(false)}
+                    className={secondaryButton}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </section>
+          )}
+
+          {/* CREATE PROJECT FORM */}
+
+          {projectFormOpen && (
+            <section className="mb-6 rounded-[22px] border border-[#456CF0]/30 bg-[#282B27] p-4 sm:p-6">
+              <div className="mb-5 flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.15em] text-[#A6AD9B]">
+                    Project management
+                  </p>
+                  <h2 className="mt-2 text-xl font-semibold">
+                    Create a project
+                  </h2>
+                </div>
+
+                <button
+                  type="button"
+                  aria-label="Close project form"
+                  onClick={() => setProjectFormOpen(false)}
+                  className="text-2xl text-[#A6AD9B]"
+                >
+                  ×
+                </button>
+              </div>
+
+              <form
+                onSubmit={(event) =>
+                  void createProject(event)
+                }
+                className="space-y-4"
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Project name
+                    </span>
+
+                    <input
+                      required
+                      maxLength={255}
+                      value={projectName}
+                      onChange={(event) =>
+                        setProjectName(event.target.value)
+                      }
+                      placeholder="Enter project name"
+                      className={inputClass}
+                    />
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="block text-xs text-[#A6AD9B]">
+                      Deadline (optional)
+                    </span>
+
+                    <input
+                      type="date"
+                      value={projectDueDate}
+                      onChange={(event) =>
+                        setProjectDueDate(event.target.value)
+                      }
+                      className={inputClass}
+                    />
+                  </label>
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className={primaryButton}
+                  >
+                    {saving
+                      ? "Saving..."
+                      : "Save project"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setProjectFormOpen(false)
+                    }
+                    className={secondaryButton}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </section>
+          )}
+
+          {/* ACTIVE VIEW */}
+
+          <div className="min-w-0">
+            {renderCurrentView()}
+          </div>
+
+          <footer className="mt-8 border-t border-white/[0.07] py-5 text-xs text-[#899385]">
+            DAYFLOW — Your Personal Life Operating System
+          </footer>
+        </div>
+      </div>
     </main>
   );
 }
